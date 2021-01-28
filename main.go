@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 )
 
 func execInput(input string) error {
@@ -40,8 +38,9 @@ func execInput(input string) error {
 }
 
 func main() {
-	signal.Ignore(syscall.SIGINT)
+	// signal.Ignore(syscall.SIGINT)
 	reader := bufio.NewReader(os.Stdin)
+	go timerMsg.IncId()
 	for {
 		fmt.Print("OrgTimer>>>> ")
 		// Read the keyboad input.

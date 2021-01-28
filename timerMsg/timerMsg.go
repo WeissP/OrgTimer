@@ -1,13 +1,8 @@
 package timerMsg
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
-	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
@@ -17,6 +12,7 @@ import (
 
 type Msg struct {
 	title, content, img, from string
+	endTime                   time.Time
 	timer                     *time.Timer
 	id                        int
 }
@@ -26,18 +22,19 @@ const (
 )
 
 var (
-	maxId   = 0
+	id      = make(chan int)
 	msgMap  = make(map[int]Msg)
 	idMutex sync.Mutex
 	todoReg = regexp.MustCompile(``)
 	timeReg = regexp.MustCompile(``)
 )
 
-func incId() int {
-	idMutex.Lock()
-	maxId++
-	idMutex.Unlock()
-	return maxId
+func IncId() {
+	maxId := 0
+	for {
+		id <- maxId
+		maxId++
+	}
 }
 
 func New(title string) (m Msg) {
@@ -55,14 +52,15 @@ func NewDefault(t string) (Msg, error) {
 	if err != nil {
 		return m, errors.New(fmt.Sprintf("can't parse %v to duration", t))
 	}
-	m.timer = time.NewTimer(duration)
-	m.id = incId()
+	m.endTime = time.Now().Add(duration)
+	// m.timer = time.NewTimer(duration)
+	m.id = <-id
 	msgMap[m.id] = m
 	return m, nil
 }
 
 func (m Msg) toString() string {
-	return fmt.Sprintf("============\n%d: %s\n%s\n", m.id, m.title, m.content)
+	return fmt.Sprintf("============\n%d: %s\nend at: %s\n%s\n", m.id, m.title, m.endTime.Format("15:04 02.01.2006"), m.content)
 }
 
 func (m Msg) notify() {
@@ -71,10 +69,12 @@ func (m Msg) notify() {
 	if err != nil {
 		panic(err)
 	}
-	exec.Command("mplayer", "-endpos", "5", "/home/weiss/Music/soft_alarm_2.mp3").Output()
+	// exec.Command("mplayer", "-endpos", "5", "/home/weiss/Music/soft_alarm_2.mp3").Output()
 }
 
 func (m Msg) Start() {
+	d := m.endTime.Sub(time.Now())
+	m.timer = time.NewTimer(d)
 	<-m.timer.C
 	m.notify()
 	delete(msgMap, m.id)
