@@ -5,10 +5,16 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/gookit/color"
+)
+
+var (
+	red   = color.FgRed.Render
+	green = color.FgGreen.Render
 )
 
 func execInput(input string) error {
@@ -29,23 +35,20 @@ func execInput(input string) error {
 			return err
 		}
 		go m.Start()
-		fmt.Printf("new Timer with %v\n", arrInput[1])
+		fmt.Printf("new Timer with %v\n", green(arrInput[1]))
 	case "c":
 		if l == 1 {
 			return errors.New("please enter the timer id that you want to cancel!")
 		}
 		id, err := strconv.Atoi(arrInput[1])
 		if err != nil {
-			fmt.Printf("cannot convert %v to int!\n", arrInput[1])
-			log.Fatal(err)
+			return errors.New(fmt.Sprintf("except time but was: %s", arrInput[1]))
 		}
-		// fmt.Println("parse time")
-		// fmt.Printf("cancel %v", id)
 		timerMsg.CancelTimer(id)
 	case "l":
 		timerMsg.PrintAll()
 	case "r":
-		timerMsg.Refresh()
+		timerMsg.RefreshAllFiles()
 		timerMsg.PrintAll()
 	case "q":
 		os.Exit(0)
@@ -56,22 +59,20 @@ func execInput(input string) error {
 func main() {
 	// signal.Ignore(syscall.SIGINT)
 	reader := bufio.NewReader(os.Stdin)
-	go timerMsg.IncId()
-	timerMsg.Refresh()
 	timerMsg.PrintAll()
-	go timerMsg.AutoRefresh()
 	for {
 		fmt.Print("OrgTimer>>>> ")
-		// timerMsg.NewHeader <- true
+		// NewHeader <- true
 		// Read the keyboad input.
 		input, err := reader.ReadString('\n')
 		if err != nil {
+			// fmt.Printf("%v", red(err))
 			fmt.Fprintln(os.Stderr, err)
 		}
 
 		// Handle the execution of the input.
 		if err = execInput(input); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, red(err))
 		}
 	}
 }

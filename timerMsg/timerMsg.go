@@ -13,8 +13,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/gen2brain/beeep"
+	"github.com/gookit/color"
 )
+
+func init() {
+	today = time.Now().Day()
+	go IncId()
+
+	RefreshAllFiles()
+	go watchFiles()
+	go AutoRefresh()
+}
 
 type Msg struct {
 	title, content, img, from string
@@ -22,6 +33,7 @@ type Msg struct {
 	timer                     *time.Timer
 	id                        int
 	cancel                    chan bool
+	disabled                  bool
 }
 
 type changedItems struct {
@@ -30,47 +42,35 @@ type changedItems struct {
 
 const (
 	orgFilePath = "/home/weiss/Dropbox/Org-roam/daily/"
+	watchDays   = 1 // 0 is only today
 )
 
 var (
 	id           = make(chan int)
-	msgMap       = make(map[int]Msg)
+	msgMap       = make(map[int]*Msg)
+	changedFiles []string
 	ChangedItems changedItems
 	refreshMutex sync.Mutex
+	today        int
 	todoReg      = regexp.MustCompile(`^\*+ TODO (?P<title>.+)`)
 	timeReg      = regexp.MustCompile(`.*SCHEDULED: <(?P<date>\d{4}-\d{2}-\d{2}) [a-zA-Z]{2} (?P<time>\d{2}:\d{2})>`)
+
+	red   = color.FgRed.Render
+	green = color.FgGreen.Render
+	blue  = color.FgLightBlue.Render
 )
-var test = make(chan bool)
 
 func CancelTimer(id int) {
 	if x, ok := msgMap[id]; ok {
+		x.disableTimer()
 		x.cancel <- true
-		delete(msgMap, id)
 	} else {
-		fmt.Printf("the id %v doesn't exist!\n", id)
+		fmt.Printf("the id %v doesn't exist or is aleady disabled!\n", id)
 	}
 }
 
-func NotifyChanged() {
-	sl := ""
-	if len(ChangedItems.added) > 0 {
-		sl += "Added:\n"
-		sl += strings.Join(ChangedItems.added, "\n")
-	}
-	if len(ChangedItems.removed) > 0 {
-		if sl != "" {
-			sl += "\n=============\n"
-		}
-		sl += "Removed:\n"
-		sl += strings.Join(ChangedItems.removed, "\n")
-		sl += "\n"
-	}
-	err := beeep.Notify("items Changed", sl, "")
-	if err != nil {
-		panic(err)
-	}
-	ChangedItems.added = nil
-	ChangedItems.removed = nil
+func (x *Msg) disableTimer() {
+	x.disabled = true
 }
 
 func IncId() {
@@ -104,53 +104,48 @@ func NewDefault(t string) (Msg, error) {
 	m.endTime = time.Now().Add(duration)
 	// m.timer = time.NewTimer(duration)
 	m.id = <-id
-	msgMap[m.id] = m
+	msgMap[m.id] = &m
 	return m, nil
 }
 
-func (m Msg) toString() string {
-	return fmt.Sprintf("============\n%d: %s\nend at: <%s>\n%s\n", m.id, m.title, m.endTime.Format("15:04 02.01.2006"), m.content)
+func (m *Msg) toString() string {
+	return fmt.Sprintf("============\n%s: %s\nend at: %s\nremain: %s\n%s\n", blue(m.id), m.title, green(m.endTime.Format("15:04 02.01.2006")), green(time.Until(m.endTime).Round(time.Second)), m.content)
 }
 
-func (m Msg) notify() {
-	err := beeep.Notify(m.title, m.content, "")
-	if err != nil {
-		panic(err)
-	}
-	exec.Command("mplayer", "-endpos", "5", "/home/weiss/Music/soft_alarm_2.mp3").Output()
-}
-
-func (m Msg) Start() {
+func (m *Msg) Start() {
 	if m.id == 0 {
 		fmt.Println("cannot start Msg with id=0")
 	} else {
 		if m.endTime.After(time.Now()) {
 			d := time.Until(m.endTime)
 			m.timer = time.NewTimer(d)
+		loop:
 			for {
 				time.Sleep(1000 * time.Millisecond)
 				select {
 				case <-m.timer.C:
-					m.notify()
-					break
+					if !m.disabled {
+						m.notify()
+					}
+					break loop
 				case <-m.cancel:
-					fmt.Printf("cancelled!\n")
+					fmt.Printf(red("cancelled!\n"))
 					PrintAll()
 					fmt.Print("OrgTimer>>>> ")
-					break
+					break loop
 				}
 			}
 		}
-		delete(msgMap, m.id)
+		m.disableTimer()
 	}
 }
 
-func getOrgFileName() string {
-	return fmt.Sprintf("Ʀd-%v.org", time.Now().Format("2006-01-02"))
+func getOrgFileName(day int) string {
+	return fmt.Sprintf("Ʀd-%v.org", time.Now().AddDate(0, 0, day).Format("2006-01-02"))
 }
 
 func parseOrgTime(t string) time.Time {
-	loc, _ := time.LoadLocation("Europe/Berlin")
+	loc := time.Now().Location()
 	dateStr := timeReg.ReplaceAllString(t, `${date}`)
 	timeStr := timeReg.ReplaceAllString(t, `${time}`)
 	res, err := time.ParseInLocation("2006-01-02,15:04", dateStr+","+timeStr, loc)
@@ -160,38 +155,84 @@ func parseOrgTime(t string) time.Time {
 	return res
 }
 
-func getNew() (map[int]Msg, bool) {
-	f, err := os.Open(filepath.Join(orgFilePath, getOrgFileName()))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false
-		}
-		log.Fatal(err)
-	}
-	defer func() {
-		if err = f.Close(); err != nil {
-			log.Fatal(err)
-		}
-	}()
-	s := bufio.NewScanner(f)
+func scanFiles(l []string) (map[int]Msg, bool) {
 	var (
 		newMsgMap = make(map[int]Msg)
 		temp      string
-		i         = 0
+		index     = 0
+		found     = false
 	)
-	for s.Scan() {
-		// temp is the previous line
-		if timeReg.MatchString(s.Text()) && todoReg.MatchString(temp) {
-			title := todoReg.ReplaceAllString(temp, `${title}`)
-			m := newTemp(title, "", parseOrgTime(s.Text()))
-			newMsgMap[i] = m
-			i++
+	for _, x := range l {
+		f, err := os.Open(x)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			log.Fatal(err)
 		}
-		temp = s.Text()
+		defer func() {
+			if err = f.Close(); err != nil {
+				log.Fatal(err)
+			}
+		}()
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			// temp is the previous line
+			if timeReg.MatchString(s.Text()) && todoReg.MatchString(temp) {
+				found = true
+				title := todoReg.ReplaceAllString(temp, `${title}`)
+				m := newTemp(title, "", parseOrgTime(s.Text()))
+				newMsgMap[index] = m
+				index++
+			}
+			temp = s.Text()
+		}
+		err = s.Err()
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
-	err = s.Err()
-	if err != nil {
-		log.Fatal(err)
+	return newMsgMap, found
+}
+
+func getNew(day int) (map[int]Msg, bool) {
+	var (
+		newMsgMap = make(map[int]Msg)
+		temp      string
+		index     = 0
+	)
+	for i := 0; i <= day; i++ {
+		f, err := os.Open(filepath.Join(orgFilePath, getOrgFileName(i)))
+		if err != nil {
+			if os.IsNotExist(err) {
+				if i == 0 {
+					return nil, false
+				} else {
+					continue
+				}
+			}
+			log.Fatal(err)
+		}
+		defer func() {
+			if err = f.Close(); err != nil {
+				log.Fatal(err)
+			}
+		}()
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			// temp is the previous line
+			if timeReg.MatchString(s.Text()) && todoReg.MatchString(temp) {
+				title := todoReg.ReplaceAllString(temp, `${title}`)
+				m := newTemp(title, "", parseOrgTime(s.Text()))
+				newMsgMap[i] = m
+				index++
+			}
+			temp = s.Text()
+		}
+		err = s.Err()
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 	return newMsgMap, true
 }
@@ -210,6 +251,8 @@ func merge(o map[int]Msg) {
 			}
 			if !exist {
 				ChangedItems.removed = append(ChangedItems.removed, msgMap[i].title)
+				m := msgMap[i]
+				m.disableTimer()
 				delete(msgMap, i)
 				exist = false
 				changed = true
@@ -223,7 +266,7 @@ func merge(o map[int]Msg) {
 			ChangedItems.added = append(ChangedItems.added, x.title)
 			x.timer = time.NewTimer(d)
 			x.id = <-id
-			msgMap[x.id] = x
+			msgMap[x.id] = &x
 			go x.Start()
 		}
 	}
@@ -232,12 +275,28 @@ func merge(o map[int]Msg) {
 	}
 }
 
-func Refresh() {
-	m, exist := getNew()
-	if exist {
-		refreshMutex.Lock()
-		merge(m)
-		refreshMutex.Unlock()
+func refreshMap(m map[int]Msg) {
+	refreshMutex.Lock()
+	merge(m)
+	refreshMutex.Unlock()
+}
+
+func RefreshAllFiles() {
+	var allFiles [watchDays + 1]string
+	for i := 0; i <= watchDays; i++ {
+		fmt.Printf("%v", getOrgFileName(i))
+		allFiles[i] = filepath.Join(orgFilePath, getOrgFileName(i))
+	}
+	m, found := scanFiles(allFiles[:])
+	if found {
+		refreshMap(m)
+	}
+}
+
+func refreshFiles() {
+	m, found := scanFiles(changedFiles)
+	if found {
+		refreshMap(m)
 	}
 }
 
@@ -245,23 +304,105 @@ func AutoRefresh() {
 	// c := time.Tick(5 * time.Minute)
 	c := time.Tick(5 * time.Second)
 	for range c {
-		Refresh()
+		if changedFiles != nil {
+			refreshFiles()
+			changedFiles = nil
+		}
 	}
 }
 
+func watchFiles() {
+	watcher := refreshWatcher()
+	for {
+		if today != time.Now().Day() {
+			watcher.Close()
+			today = time.Now().Day()
+			watcher = refreshWatcher()
+		}
+		select {
+		case event, eventOk := <-watcher.Events:
+			if !eventOk {
+				log.Println("error")
+				return
+			}
+			if event.Op&fsnotify.Write == fsnotify.Write {
+				contains := false
+				for _, x := range changedFiles {
+					if x == event.Name {
+						contains = true
+					}
+				}
+				if !contains {
+					changedFiles = append(changedFiles, event.Name)
+				}
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Println("error:", err)
+		}
+
+	}
+}
+
+func refreshWatcher() *fsnotify.Watcher {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Println("ERROR", err)
+	}
+
+	for i := 0; i <= watchDays; i++ {
+		if err := watcher.Add(filepath.Join(orgFilePath, getOrgFileName(i))); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			fmt.Println("ERROR", err)
+		}
+	}
+	return watcher
+}
+
 func PrintAll() {
-	if len(msgMap) == 0{
-		fmt.Println("there is current no timer")
-		return 
+	if len(msgMap) == 0 {
+		fmt.Println(red("there is current no timer"))
+		return
 	}
 	fmt.Println("\nall items:")
-	// print map with the order of Msg.id
-	l, i := len(msgMap), 0
-	for l > 0 {
-		if x, ok := msgMap[i]; ok {
+	for _, x := range msgMap {
+		if !x.disabled {
 			fmt.Printf(x.toString())
-			l--
 		}
-		i++
 	}
+}
+
+func NotifyChanged() {
+	sl := ""
+	if len(ChangedItems.added) > 0 {
+		sl += "Added:\n"
+		sl += strings.Join(ChangedItems.added, "\n")
+	}
+	if len(ChangedItems.removed) > 0 {
+		if sl != "" {
+			sl += "\n=============\n"
+		}
+		sl += "Removed:\n"
+		sl += strings.Join(ChangedItems.removed, "\n")
+		sl += "\n"
+	}
+	err := beeep.Notify("items Changed", sl, "")
+	if err != nil {
+		panic(err)
+	}
+	ChangedItems.added = nil
+	ChangedItems.removed = nil
+}
+
+func (m Msg) notify() {
+	err := beeep.Notify(m.title, m.content, "")
+	if err != nil {
+		panic(err)
+	}
+	exec.Command("mplayer", "-endpos", "5", "/home/weiss/Music/soft_alarm_2.mp3").Output()
 }
