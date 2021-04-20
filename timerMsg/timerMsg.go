@@ -25,6 +25,7 @@ func init() {
 	RefreshAllFiles()
 	go watchFiles()
 	go AutoRefresh()
+	go dailyNotify()
 }
 
 type Msg struct {
@@ -41,19 +42,23 @@ type changedItems struct {
 }
 
 const (
-	orgFilePath = "/home/weiss/Dropbox/Org-roam/daily/"
-	watchDays   = 1 // 0 is only today
+	orgDailyFilePath = "/home/weiss/Dropbox/Org-roam/daily/"
+	watchDays        = 1 // 0 is only today
+	dailyNotifyTime  = 12
 )
 
 var (
+	extraOrgFiles = []string{"/home/weiss/Dropbox/Org-roam/orgzly/todo.org"}
+
 	id           = make(chan int)
 	msgMap       = make(map[int]*Msg)
+	watchedFiles []string
 	changedFiles []string
 	ChangedItems changedItems
 	refreshMutex sync.Mutex
 	today        int
 	todoReg      = regexp.MustCompile(`^\*+ TODO (?P<title>.+)`)
-	timeReg      = regexp.MustCompile(`.*SCHEDULED: <(?P<date>\d{4}-\d{2}-\d{2}) [a-zA-Z]{2} (?P<time>\d{2}:\d{2})>`)
+	timeReg      = regexp.MustCompile(`.*SCHEDULED: <(?P<date>\d{4}-\d{2}-\d{2}) [a-zA-Z]{2} (?P<time>\d{2}:\d{2})(\-\d{2}:\d{2})?( \+1w)?>`)
 
 	red   = color.FgRed.Render
 	green = color.FgGreen.Render
@@ -70,6 +75,8 @@ func CancelTimer(id int) {
 }
 
 func (x *Msg) disableTimer() {
+	fmt.Printf("%v", x.toString())
+	fmt.Println("disabled")
 	x.disabled = true
 }
 
@@ -90,7 +97,7 @@ func newTemp(title, content string, endTime time.Time) (m Msg) {
 	return m
 }
 
-func NewDefault(t string) (Msg, error) {
+func NewDefault(t string) (*Msg, error) {
 	var (
 		m Msg
 	)
@@ -99,48 +106,59 @@ func NewDefault(t string) (Msg, error) {
 	m.title = "timeup"
 	duration, err := time.ParseDuration(t)
 	if err != nil {
-		return m, errors.New(fmt.Sprintf("can't parse %v to duration", t))
+		return &m, errors.New(fmt.Sprintf("can't parse %v to duration", t))
 	}
 	m.endTime = time.Now().Add(duration)
-	// m.timer = time.NewTimer(duration)
 	m.id = <-id
-	msgMap[m.id] = &m
-	return m, nil
+	// msgMap[m.id] = &m
+	return &m, nil
 }
 
 func (m *Msg) toString() string {
 	return fmt.Sprintf("============\n%s: %s\nend at: %s\nremain: %s\n%s\n", blue(m.id), m.title, green(m.endTime.Format("15:04 02.01.2006")), green(time.Until(m.endTime).Round(time.Second)), m.content)
 }
 
+func (m *Msg) test() {
+	fmt.Printf("\nTested msg id: %v title: %v\n", m.id, m.title)
+}
+
 func (m *Msg) Start() {
 	if m.id == 0 {
-		fmt.Println("cannot start Msg with id=0")
+		fmt.Println("\ncannot start Msg with id=0{")
+		fmt.Printf("%v", m.toString())
+		fmt.Println("}")
 	} else {
 		if m.endTime.After(time.Now()) {
 			d := time.Until(m.endTime)
 			m.timer = time.NewTimer(d)
-		loop:
 			for {
 				time.Sleep(1000 * time.Millisecond)
+				if m.endTime.Before(time.Now()) {
+					m.disabled = true
+					return
+				}
 				select {
 				case <-m.timer.C:
 					if !m.disabled {
 						m.notify()
+						m.disableTimer()
 					}
-					break loop
+					fmt.Printf("%v", m.toString())
+					return
 				case <-m.cancel:
+					m.timer.Stop()
 					fmt.Printf(red("cancelled!\n"))
 					PrintAll()
 					fmt.Print("OrgTimer>>>> ")
-					break loop
+					m.disableTimer()
+					return
 				}
 			}
 		}
-		m.disableTimer()
 	}
 }
 
-func getOrgFileName(day int) string {
+func getOrgDailyFileName(day int) string {
 	return fmt.Sprintf("Ʀd-%v.org", time.Now().AddDate(0, 0, day).Format("2006-01-02"))
 }
 
@@ -155,9 +173,9 @@ func parseOrgTime(t string) time.Time {
 	return res
 }
 
-func scanFiles(l []string) (map[int]Msg, bool) {
+func scanFiles(l []string) (map[int]*Msg, bool) {
 	var (
-		newMsgMap = make(map[int]Msg)
+		newMsgMap = make(map[int]*Msg)
 		temp      string
 		index     = 0
 		found     = false
@@ -179,11 +197,14 @@ func scanFiles(l []string) (map[int]Msg, bool) {
 		for s.Scan() {
 			// temp is the previous line
 			if timeReg.MatchString(s.Text()) && todoReg.MatchString(temp) {
-				found = true
 				title := todoReg.ReplaceAllString(temp, `${title}`)
-				m := newTemp(title, "", parseOrgTime(s.Text()))
-				newMsgMap[index] = m
-				index++
+				orgEndTime := parseOrgTime(s.Text())
+				if orgEndTime.After(time.Now()) {
+					found = true
+					m := newTemp(title, "", orgEndTime)
+					newMsgMap[index] = &m
+					index++
+				}
 			}
 			temp = s.Text()
 		}
@@ -195,53 +216,12 @@ func scanFiles(l []string) (map[int]Msg, bool) {
 	return newMsgMap, found
 }
 
-func getNew(day int) (map[int]Msg, bool) {
-	var (
-		newMsgMap = make(map[int]Msg)
-		temp      string
-		index     = 0
-	)
-	for i := 0; i <= day; i++ {
-		f, err := os.Open(filepath.Join(orgFilePath, getOrgFileName(i)))
-		if err != nil {
-			if os.IsNotExist(err) {
-				if i == 0 {
-					return nil, false
-				} else {
-					continue
-				}
-			}
-			log.Fatal(err)
-		}
-		defer func() {
-			if err = f.Close(); err != nil {
-				log.Fatal(err)
-			}
-		}()
-		s := bufio.NewScanner(f)
-		for s.Scan() {
-			// temp is the previous line
-			if timeReg.MatchString(s.Text()) && todoReg.MatchString(temp) {
-				title := todoReg.ReplaceAllString(temp, `${title}`)
-				m := newTemp(title, "", parseOrgTime(s.Text()))
-				newMsgMap[i] = m
-				index++
-			}
-			temp = s.Text()
-		}
-		err = s.Err()
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-	return newMsgMap, true
-}
-
-func merge(o map[int]Msg) {
+func merge(o map[int]*Msg) {
 	exist := false
 	changed := false
 	for i, x := range msgMap {
 		if x.from == "Org" {
+			exist = false
 			for j, y := range o {
 				if x.title == y.title && x.endTime.Equal(y.endTime) {
 					delete(o, j)
@@ -253,12 +233,13 @@ func merge(o map[int]Msg) {
 				ChangedItems.removed = append(ChangedItems.removed, msgMap[i].title)
 				m := msgMap[i]
 				m.disableTimer()
+				// fmt.Printf("deleted msgMap: %v", msgMap[i].toString())
 				delete(msgMap, i)
-				exist = false
 				changed = true
 			}
 		}
 	}
+
 	for _, x := range o {
 		if x.endTime.After(time.Now()) {
 			d := time.Until(x.endTime)
@@ -266,7 +247,7 @@ func merge(o map[int]Msg) {
 			ChangedItems.added = append(ChangedItems.added, x.title)
 			x.timer = time.NewTimer(d)
 			x.id = <-id
-			msgMap[x.id] = &x
+			msgMap[x.id] = x
 			go x.Start()
 		}
 	}
@@ -275,19 +256,23 @@ func merge(o map[int]Msg) {
 	}
 }
 
-func refreshMap(m map[int]Msg) {
+func refreshMap(m map[int]*Msg) {
 	refreshMutex.Lock()
 	merge(m)
 	refreshMutex.Unlock()
 }
 
-func RefreshAllFiles() {
-	var allFiles [watchDays + 1]string
+func getAllFilesByWatchDays() []string {
+	var dailyFiles [watchDays + 1]string
 	for i := 0; i <= watchDays; i++ {
-		fmt.Printf("%v", getOrgFileName(i))
-		allFiles[i] = filepath.Join(orgFilePath, getOrgFileName(i))
+		dailyFiles[i] = filepath.Join(orgDailyFilePath, getOrgDailyFileName(i))
 	}
-	m, found := scanFiles(allFiles[:])
+	allFiles := append(dailyFiles[:], extraOrgFiles...)
+	return allFiles
+}
+
+func RefreshAllFiles() {
+	m, found := scanFiles(getAllFilesByWatchDays())
 	if found {
 		refreshMap(m)
 	}
@@ -311,7 +296,32 @@ func AutoRefresh() {
 	}
 }
 
+func watchNewFiles(ch chan bool) {
+	c := time.Tick(5 * time.Second)
+	for range c {
+		for _, x := range getAllFilesByWatchDays() {
+			contains := false
+			for _, y := range watchedFiles {
+				if x == y {
+					contains = true
+				}
+			}
+			if !contains {
+				if _, err := os.Stat(x); err == nil {
+					ch <- true
+				}
+			}
+		}
+	}
+}
+
+func AllChangedFiles() {
+	fmt.Printf("%v", watchedFiles)
+}
+
 func watchFiles() {
+	newFiles := make(chan bool)
+	go watchNewFiles(newFiles)
 	watcher := refreshWatcher()
 	for {
 		if today != time.Now().Day() {
@@ -320,12 +330,16 @@ func watchFiles() {
 			watcher = refreshWatcher()
 		}
 		select {
+		case <-newFiles:
+			watcher = refreshWatcher()
+			RefreshAllFiles()
 		case event, eventOk := <-watcher.Events:
 			if !eventOk {
 				log.Println("error")
 				return
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
+				// fmt.Printf("Name: %v", event.Name)
 				contains := false
 				for _, x := range changedFiles {
 					if x == event.Name {
@@ -348,31 +362,80 @@ func watchFiles() {
 }
 
 func refreshWatcher() *fsnotify.Watcher {
+	watchedFiles = nil
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Println("ERROR", err)
 	}
 
+	for _, x := range extraOrgFiles {
+		if err := watcher.Add(x); err != nil {
+			if os.IsNotExist(err) {
+				fmt.Printf("%v not exists!", x)
+				continue
+			}
+			fmt.Println("ERROR", err)
+		} else {
+			watchedFiles = append(watchedFiles, extraOrgFiles...)
+		}
+	}
+
 	for i := 0; i <= watchDays; i++ {
-		if err := watcher.Add(filepath.Join(orgFilePath, getOrgFileName(i))); err != nil {
+		if err := watcher.Add(filepath.Join(orgDailyFilePath, getOrgDailyFileName(i))); err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
 			fmt.Println("ERROR", err)
 		}
+		watchedFiles = append(watchedFiles, filepath.Join(orgDailyFilePath, getOrgDailyFileName(i)))
 	}
 	return watcher
 }
 
+func getActivateMsgMap() map[int]*Msg {
+	activateMsgMap := make(map[int]*Msg)
+	for _, x := range msgMap {
+		if !x.disabled {
+			activateMsgMap[x.id] = x
+		}
+	}
+	return activateMsgMap
+}
+
 func PrintAll() {
-	if len(msgMap) == 0 {
+	activateMsgMap := getActivateMsgMap()
+	if len(activateMsgMap) == 0 {
 		fmt.Println(red("there is current no timer"))
 		return
 	}
 	fmt.Println("\nall items:")
+	for _, x := range activateMsgMap {
+		fmt.Printf(x.toString())
+	}
+}
+
+func dailyNotify() {
+	for {
+		var (
+			tNotify time.Time
+			tNow    = time.Now()
+			y, m, d = tNow.Date()
+		)
+		if tNow.Hour() < dailyNotifyTime {
+			tNotify = time.Date(y, m, d, dailyNotifyTime, 0, 0, 0, tNow.Location())
+		} else {
+			tNotify = time.Date(y, m, d+1, dailyNotifyTime, 0, 0, 0, tNow.Location())
+		}
+		timedTimer := time.NewTimer(time.Until(tNotify))
+		<-timedTimer.C
+		NotifyAll()
+	}
+}
+
+func NotifyAll() {
 	for _, x := range msgMap {
 		if !x.disabled {
-			fmt.Printf(x.toString())
+			beeep.Notify(x.title, x.content, "")
 		}
 	}
 }

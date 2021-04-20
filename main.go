@@ -30,11 +30,11 @@ func execInput(input string) error {
 		if l == 1 {
 			return errors.New("please enter time!")
 		}
-		m, err := timerMsg.NewDefault(arrInput[1])
-		if err != nil {
-			return err
-		}
-		go m.Start()
+		// m, err := timerMsg.NewDefault(arrInput[1])
+		// if err != nil {
+		// 	return err
+		// }
+		// go m.Start()
 		fmt.Printf("new Timer with %v\n", green(arrInput[1]))
 	case "c":
 		if l == 1 {
@@ -47,6 +47,8 @@ func execInput(input string) error {
 		timerMsg.CancelTimer(id)
 	case "l":
 		timerMsg.PrintAll()
+	case "a":
+		timerMsg.AllChangedFiles()
 	case "r":
 		timerMsg.RefreshAllFiles()
 		timerMsg.PrintAll()
