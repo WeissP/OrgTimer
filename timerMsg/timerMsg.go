@@ -16,6 +16,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/gen2brain/beeep"
 	"github.com/gookit/color"
+	"github.com/hako/durafmt"
 )
 
 func init() {
@@ -118,12 +119,24 @@ func NewDefault(t string) (*Msg, error) {
 }
 
 func (m *Msg) toString() string {
-	return fmt.Sprintf("============\n%s: %s\nend at: %s\nremain: %s\n%s\n", blue(m.id), m.title, green(m.endTime.Format("15:04 02.01.2006")), green(time.Until(m.endTime).Round(time.Second)), m.content)
+	var (
+		dura    = time.Until(m.endTime)
+		duraStr string
+	)
+	switch {
+	case dura.Hours() > 24:
+		duraStr = durafmt.Parse(time.Until(m.endTime).Round(time.Hour)).String()
+	case dura.Hours() > 1:
+		duraStr = durafmt.Parse(time.Until(m.endTime).Round(time.Minute)).String()
+	default:
+		duraStr = durafmt.Parse(time.Until(m.endTime).Round(time.Second)).String()
+	}
+	return fmt.Sprintf("============\n%s: %s\nend at: %s\nremain: %s\n%s\n", blue(m.id), m.title, green(m.endTime.Format("15:04 02.01.2006")), green(duraStr), m.content)
 }
 
-func (m *Msg) test() {
-	fmt.Printf("\nTested msg id: %v title: %v\n", m.id, m.title)
-}
+// func (m *Msg) test() {
+// 	fmt.Printf("\nTested msg id: %v title: %v\n", m.id, m.title)
+// }
 
 func (m *Msg) Start() {
 	if m.id == 0 {
@@ -460,7 +473,7 @@ func dailyNotify() {
 		if tNotify.Before(tNow) {
 			tNotify = tNotify.AddDate(0, 0, 1)
 		}
-		fmt.Printf("timedTimer:%v", tNotify.Format("15:04 02.01.2006"))
+		// fmt.Printf("timedTimer:%v", tNotify.Format("15:04 02.01.2006"))
 		timedTimer := time.NewTimer(time.Until(tNotify))
 		<-timedTimer.C
 		NotifyNextFewDays(dailyNotifyDays)
