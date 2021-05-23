@@ -44,7 +44,8 @@ type changedItems struct {
 const (
 	orgDailyFilePath = "/home/weiss/Dropbox/Org-roam/daily/"
 	watchDays        = 1 // 0 is only today
-	dailyNotifyTime  = 12
+	dailyNotifyHour  = 12
+	dailyNotifyDays  = 2
 )
 
 var (
@@ -57,7 +58,7 @@ var (
 	ChangedItems changedItems
 	refreshMutex sync.Mutex
 	today        int
-	todoReg      = regexp.MustCompile(`^\*+ TODO (?P<title>.+)`)
+	todoReg      = regexp.MustCompile(`^\*+ TODO|INPROGRESS (?P<title>.+)`)
 	timeReg      = regexp.MustCompile(`.*SCHEDULED: <(?P<date>\d{4}-\d{2}-\d{2}) [a-zA-Z]{2} (?P<time>\d{2}:\d{2})(\-\d{2}:\d{2})?( \+1w)?>`)
 
 	red   = color.FgRed.Render
@@ -67,16 +68,18 @@ var (
 
 func CancelTimer(id int) {
 	if x, ok := msgMap[id]; ok {
-		x.disableTimer()
+		x.disableTimer(true)
 		x.cancel <- true
 	} else {
 		fmt.Printf("the id %v doesn't exist or is aleady disabled!\n", id)
 	}
 }
 
-func (x *Msg) disableTimer() {
-	fmt.Printf("%v", x.toString())
-	fmt.Println("disabled")
+func (x *Msg) disableTimer(notify bool) {
+	if notify {
+		fmt.Printf("%v", x.toString())
+		fmt.Println("disabled")
+	}
 	x.disabled = true
 }
 
@@ -110,7 +113,7 @@ func NewDefault(t string) (*Msg, error) {
 	}
 	m.endTime = time.Now().Add(duration)
 	m.id = <-id
-	// msgMap[m.id] = &m
+	msgMap[m.id] = &m
 	return &m, nil
 }
 
@@ -141,7 +144,8 @@ func (m *Msg) Start() {
 				case <-m.timer.C:
 					if !m.disabled {
 						m.notify()
-						m.disableTimer()
+						m.disableTimer(false)
+						fmt.Print("OrgTimer>>>> ")
 					}
 					fmt.Printf("%v", m.toString())
 					return
@@ -149,8 +153,8 @@ func (m *Msg) Start() {
 					m.timer.Stop()
 					fmt.Printf(red("cancelled!\n"))
 					PrintAll()
+					m.disableTimer(true)
 					fmt.Print("OrgTimer>>>> ")
-					m.disableTimer()
 					return
 				}
 			}
@@ -232,7 +236,7 @@ func merge(o map[int]*Msg) {
 			if !exist {
 				ChangedItems.removed = append(ChangedItems.removed, msgMap[i].title)
 				m := msgMap[i]
-				m.disableTimer()
+				m.disableTimer(false)
 				// fmt.Printf("deleted msgMap: %v", msgMap[i].toString())
 				delete(msgMap, i)
 				changed = true
@@ -286,8 +290,8 @@ func refreshFiles() {
 }
 
 func AutoRefresh() {
-	// c := time.Tick(5 * time.Minute)
-	c := time.Tick(5 * time.Second)
+	c := time.Tick(5 * time.Minute)
+	// c := time.Tick(5 * time.Second)
 	for range c {
 		if changedFiles != nil {
 			refreshFiles()
@@ -409,32 +413,76 @@ func PrintAll() {
 		return
 	}
 	fmt.Println("\nall items:")
+	var s []int
 	for _, x := range activateMsgMap {
-		fmt.Printf(x.toString())
+		// fmt.Printf("\nmap in activateMsgMap: %v", x.toString())
+		s = sortedInsert(s, x.id)
+		// fmt.Printf("////s: %v", s)
 	}
+	for i := len(s) - 1; i >= 0; i-- {
+		fmt.Printf(msgMap[s[i]].toString())
+	}
+}
+
+func isEarlier(idA, idB int) bool {
+	return msgMap[idA].endTime.Before(msgMap[idB].endTime)
+}
+
+func sortedInsert(s []int, n int) []int {
+	if len(s) == 0 {
+		s = append(s, n)
+	} else {
+		for i, x := range s {
+			if isEarlier(n, x) {
+				// fmt.Printf("\n%v is earlier than %v", n, x)
+				s = append(s[:i+1], s[i:]...)
+				s[i] = n
+				break
+			}
+			if i == len(s)-1 {
+				// fmt.Println("////len")
+				s = append(s, n)
+				break
+			}
+		}
+	}
+	return s
 }
 
 func dailyNotify() {
 	for {
 		var (
-			tNotify time.Time
 			tNow    = time.Now()
 			y, m, d = tNow.Date()
+			tNotify = time.Date(y, m, d, dailyNotifyHour, 0, 0, 0, tNow.Location())
 		)
-		if tNow.Hour() < dailyNotifyTime {
-			tNotify = time.Date(y, m, d, dailyNotifyTime, 0, 0, 0, tNow.Location())
-		} else {
-			tNotify = time.Date(y, m, d+1, dailyNotifyTime, 0, 0, 0, tNow.Location())
+		// fmt.Printf("timedTimer Before add Date:%v", tNotify.Format("15:04 02.01.2006"))
+		if tNotify.Before(tNow) {
+			tNotify = tNotify.AddDate(0, 0, 1)
 		}
+		fmt.Printf("timedTimer:%v", tNotify.Format("15:04 02.01.2006"))
 		timedTimer := time.NewTimer(time.Until(tNotify))
 		<-timedTimer.C
-		NotifyAll()
+		NotifyNextFewDays(dailyNotifyDays)
 	}
 }
 
 func NotifyAll() {
 	for _, x := range msgMap {
 		if !x.disabled {
+			beeep.Notify(x.title, x.content, "")
+		}
+	}
+}
+
+func NotifyNextFewDays(days int) {
+	var (
+		tNow      = time.Now()
+		y, m, d   = tNow.Date()
+		timePoint = time.Date(y, m, d, 23, 59, 59, 0, tNow.Location()).AddDate(0, 0, days)
+	)
+	for _, x := range msgMap {
+		if !x.disabled && x.endTime.Before(timePoint) {
 			beeep.Notify(x.title, x.content, "")
 		}
 	}
