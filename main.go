@@ -1,7 +1,8 @@
 package main
 
 import (
-	"OrgTimer/timerMsg"
+	"OrgTimer/common"
+	"OrgTimer/timer"
 	"bufio"
 	"errors"
 	"fmt"
@@ -30,40 +31,49 @@ func execInput(input string) error {
 		if l == 1 {
 			return errors.New("please enter time!")
 		}
-		m, err := timerMsg.NewDefault(arrInput[1])
+		err := timer.NewDefault(arrInput[1])
 		if err != nil {
 			return err
 		}
-		go m.Start()
 		fmt.Printf("new Timer with %v\n", green(arrInput[1]))
 	case "c":
 		if l == 1 {
 			return errors.New("please enter the timer id that you want to cancel!")
 		}
-		id, err := strconv.Atoi(arrInput[1])
+		index, err := strconv.Atoi(arrInput[1])
 		if err != nil {
 			return errors.New(fmt.Sprintf("except time but was: %s", arrInput[1]))
 		}
-		timerMsg.CancelTimer(id)
+		if err := timer.CancelTimer(index); err != nil {
+			return errors.New(fmt.Sprintf("the index was invalid: %v", index))
+		}
 	case "l":
-		timerMsg.PrintAll()
-	case "a":
-		timerMsg.AllChangedFiles()
+		timer.PrintAllMsgs()
+	// case "a":
+	// timerMsg.AllChangedFiles()
+	case "w":
+		timer.Write()
 	case "r":
-		timerMsg.RefreshAllFiles()
-		timerMsg.PrintAll()
+		timer.Refresh()
+		timer.PrintAllMsgs()
+	// case "t":
+	// timerMsg.Test()
 	case "q":
 		os.Exit(0)
 	}
 	return nil
 }
 
+// func main() {
+	// connector.GetSchedule().GetValidMsgs().PrintAll()
+// }
+
 func main() {
 	// signal.Ignore(syscall.SIGINT)
 	reader := bufio.NewReader(os.Stdin)
-	timerMsg.PrintAll()
+	timer.PrintAllMsgs()
 	for {
-		fmt.Print("OrgTimer>>>> ")
+		common.PrintHeader()
 		// NewHeader <- true
 		// Read the keyboad input.
 		input, err := reader.ReadString('\n')
